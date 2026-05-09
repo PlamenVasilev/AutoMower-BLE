@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 
 
 class Mower(BLEClient):
-    def __init__(self, channel_id: int, address, pin=None):
-        super().__init__(channel_id, address, pin)
+    def __init__(self, channel_id: int, address, pin=None, *, pair_on_connect: bool = True):
+        super().__init__(channel_id, address, pin, pair_on_connect=pair_on_connect)
         self.keep_alive_event = asyncio.Event()
 
     async def connect(self, device) -> ResponseResult:
@@ -328,9 +328,25 @@ if __name__ == "__main__":
         help="Send command to control mower (one of resume, pause, park or override)",
     )
 
+    parser.add_argument(
+        "--no-pair",
+        dest="pair_on_connect",
+        action="store_false",
+        help=(
+            "Skip the BLE-level pair() step. Recommended on Linux for mowers "
+            "that refuse SMP (e.g. Gardena Sileno Minimo). Authentication "
+            "still happens at the protocol layer via --pin."
+        ),
+    )
+
     args = parser.parse_args()
 
-    mower = Mower(1197489078, args.address, args.pin)
+    mower = Mower(
+        1197489078,
+        args.address,
+        args.pin,
+        pair_on_connect=args.pair_on_connect,
+    )
 
     log_level = logging.INFO
     logging.basicConfig(

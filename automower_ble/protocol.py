@@ -268,10 +268,18 @@ class Command:
 
 
 class BLEClient:
-    def __init__(self, channel_id: int, address, pin=None):
+    def __init__(
+        self,
+        channel_id: int,
+        address,
+        pin=None,
+        *,
+        pair_on_connect: bool = True,
+    ):
         self.channel_id = channel_id
         self.address = address
         self.pin = pin
+        self.pair_on_connect = pair_on_connect
         self.MTU_SIZE = 20
 
         self.lock = asyncio.Lock()
@@ -400,32 +408,42 @@ class BLEClient:
         # On Linux/BlueZ, client.pair() commonly fails with AuthenticationFailed
         # against mowers that refuse SMP outright (e.g. Sileno Minimo). Worse,
         # those mowers also drop the link as soon as they see an SMP request
-        # they don't like — and BlueZ doesn't update is_connected synchronously
-        # when that happens, so we can't rely on a property check to detect it.
-        # If pair() raises, force a clean reconnect: tear down whatever state
-        # the failed exchange left behind and start fresh, this time without
-        # calling pair().
-        logger.info("pairing device...")
-        try:
-            await self.client.pair()
-            logger.info("paired")
-        except BleakError as e:
-            logger.warning(
-                "BLE pair() failed (%s); reconnecting without OS-level pairing",
-                e,
-            )
+        # they don't like, and continue to refuse GATT operations like CCCD
+        # writes for several seconds afterwards.
+        #
+        # Caller can opt out via pair_on_connect=False (or --no-pair on the
+        # CLI) — preferred on Linux for mowers that don't need SMP at all.
+        # If pair() raises, we tear down the link and reconnect from scratch
+        # without calling pair() the second time, after a settling delay.
+        if self.pair_on_connect:
+            logger.info("pairing device...")
             try:
-                await self.client.disconnect()
-            except BleakError as disc_err:
-                logger.debug("disconnect after pair failure: %s", disc_err)
-            # Give BlueZ a moment to settle before opening a new link.
-            await asyncio.sleep(0.5)
-            self.client = await establish_connection(
-                BleakClientWithServiceCache,
-                device,
-                device.name or "Unknown Device",
-            )
-            logger.info("reconnected without pair()")
+                await self.client.pair()
+                logger.info("paired")
+            except BleakError as e:
+                logger.warning(
+                    "BLE pair() failed (%s); reconnecting without OS-level "
+                    "pairing. Tip: pass --no-pair on the CLI (or "
+                    "pair_on_connect=False) to skip this step entirely on "
+                    "mowers that refuse SMP.",
+                    e,
+                )
+                try:
+                    await self.client.disconnect()
+                except BleakError as disc_err:
+                    logger.debug("disconnect after pair failure: %s", disc_err)
+                # Give the mower's BLE stack ~3s to leave its post-rejection
+                # penalty state — shorter delays cause the next CCCD write
+                # (start_notify) to come back as ATT UNLIKELY_ERROR.
+                await asyncio.sleep(3.0)
+                self.client = await establish_connection(
+                    BleakClientWithServiceCache,
+                    device,
+                    device.name or "Unknown Device",
+                )
+                logger.info("reconnected without pair()")
+        else:
+            logger.info("skipping client.pair() (pair_on_connect=False)")
 
         # This is not safe, _mtu_size is not defined in BaseBleakClient but may
         # be defined in subclasses.
