@@ -398,10 +398,10 @@ class BLEClient:
         # Best-effort BLE-level pairing. The Husqvarna mowers authenticate at
         # the application protocol layer via EnterOperatorPin, not via SMP.
         # On Linux/BlueZ, client.pair() commonly fails with AuthenticationFailed
-        # against mowers that refuse SMP outright (e.g. Sileno Minimo); on
-        # macOS the call is often a no-op. Either way, swallow the error and
-        # let the subsequent GATT discovery and channel setup tell us whether
-        # the connection is actually usable.
+        # against mowers that refuse SMP outright (e.g. Sileno Minimo). Worse,
+        # those mowers also drop the link as soon as they see an SMP request
+        # they don't like, so even after we swallow the BleakError the next
+        # GATT call lands on a dead connection.
         logger.info("pairing device...")
         try:
             await self.client.pair()
@@ -410,6 +410,18 @@ class BLEClient:
             logger.warning(
                 "BLE pair() failed (%s); continuing without OS-level pairing", e
             )
+
+        if not self.client.is_connected:
+            logger.warning(
+                "Connection dropped during pair() attempt — reconnecting "
+                "without re-pairing"
+            )
+            self.client = await establish_connection(
+                BleakClientWithServiceCache,
+                device,
+                device.name or "Unknown Device",
+            )
+            logger.info("reconnected")
 
         # This is not safe, _mtu_size is not defined in BaseBleakClient but may
         # be defined in subclasses.
