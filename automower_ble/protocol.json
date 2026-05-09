@@ -306,5 +306,13 @@
             "code": "uint32",
             "severity": "uint8"
         }
+    },
+    "SetObstacleAvoidanceEnabled": {
+        "major": 5356,
+        "minor": 3,
+        "requestType": {
+            "enabled": "uint8"
+        },
+        "description": "ObstacleAvoidance.setEnabledRequest. Sent by the official Husqvarna app between handshake and EnterOperatorPin. On models without obstacle avoidance (e.g. Sileno Minimo 250) the firmware replies INVALID_ID, but issuing the request is part of the warmup sequence the firmware expects before it accepts a PIN."
     }
 }

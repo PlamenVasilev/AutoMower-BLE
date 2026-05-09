@@ -458,6 +458,16 @@ class BLEClient:
         if response is None:
             return ResponseResult.UNKNOWN_ERROR
 
+        # Warmup sequence required by some mower firmwares (notably the
+        # Gardena Sileno Minimo line) before they will accept EnterOperatorPin.
+        # The official Husqvarna app sends GetModel, KeepAlive and
+        # SetObstacleAvoidanceEnabled(0) immediately after the handshake.
+        # SetObstacleAvoidanceEnabled is rejected with INVALID_ID on mowers
+        # without the feature, but the firmware still treats issuing it as
+        # part of opening the session — skipping it leaves the session in a
+        # state where PIN entry silently fails.
+        await self._run_warmup()
+
         if self.pin is not None:
             command = Command(
                 self.channel_id, (await self.get_protocol())["EnterOperatorPin"]
@@ -475,6 +485,29 @@ class BLEClient:
             )
 
         return ResponseResult.OK
+
+    async def _run_warmup(self) -> None:
+        """Issue the post-handshake sequence the official app sends.
+
+        Best-effort: each call's failure is logged but does not abort the
+        connection. We need the *attempts* on the wire — their success is
+        not what unlocks the session.
+        """
+        protocol = await self.get_protocol()
+        warmup: list[tuple[str, dict]] = [
+            ("GetModel", {}),
+            ("KeepAlive", {}),
+            ("SetObstacleAvoidanceEnabled", {"enabled": 0}),
+        ]
+        for name, kwargs in warmup:
+            try:
+                command = Command(self.channel_id, protocol[name])
+                request = command.generate_request(**kwargs)
+                response = await self._request_response(request)
+                if response is None:
+                    logger.debug("Warmup %s: no response", name)
+            except Exception as e:
+                logger.debug("Warmup %s failed: %s", name, e)
 
     def is_connected(self) -> bool:
         return bool(self.client and self.client.is_connected)

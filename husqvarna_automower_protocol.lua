@@ -8,22 +8,28 @@ do
 	automower_header = ProtoField.new("Header", "automower.header", ftypes.UINT16, nil, base.HEX)
 	automower_length = ProtoField.new("Length", "automower.length", ftypes.UINT8, nil, base.DEC)
 	automower_channel_id = ProtoField.new("ChannelId", "automower.channel_id", ftypes.UINT8, nil, base.HEX)
-	automower_bool = ProtoField.new("Unknown Bool", "automower.bool", ftypes.UINT8, nil, base.HEX)
+	automower_bool = ProtoField.new("Is Linked", "automower.bool", ftypes.UINT8, nil, base.HEX)
 	automower_first_crc = ProtoField.new("First CRC", "automower.first_crc", ftypes.UINT8, nil, base.HEX)
-	automower_protocol_major = ProtoField.new("Request Major", "automower.request_major", ftypes.UINT8, nil, base.DEC)
+	automower_packet_type = ProtoField.new("Packet Type", "automower.packet_type", ftypes.UINT8, nil, base.HEX)
+	automower_frame_kind = ProtoField.new("Frame Kind", "automower.frame_kind", ftypes.STRING, nil, base.NONE)
+	automower_protocol_major = ProtoField.new("Request Major", "automower.request_major", ftypes.UINT16, nil, base.HEX)
 	automower_protocol_major_text = ProtoField.new("Req Major", "automower.req_major", ftypes.STRING, nil, base.NONE)
 	automower_protocol_minor_text = ProtoField.new("Req Minor", "automower.req_minor", ftypes.STRING, nil, base.NONE)
 	automower_protocol_minor = ProtoField.new("Request Minor", "automower.request_minor", ftypes.UINT8, nil, base.DEC)
+	automower_result = ProtoField.new("Result", "automower.result", ftypes.UINT8, nil, base.DEC)
 	automower_request_length = ProtoField.new("Request Length", "automower.request_length", ftypes.UINT8, nil, base.DEC)
 	automower_response_length = ProtoField.new("Response Length", "automower.response_length", ftypes.UINT8, nil, base.DEC)
 	automower_request_data = ProtoField.bytes("automower.request_data", "Request Data")
 	automower_response_data = ProtoField.bytes("automower.response_data", "Response Data")
 	automower_full_crc = ProtoField.new("Full CRC", "automower.full_crc", ftypes.UINT8, nil, base.HEX)
 	automower_footer = ProtoField.new("Footer", "automower.footer", ftypes.UINT8, nil, base.HEX)
+	automower_setup_name = ProtoField.new("Channel Name", "automower.channel_name", ftypes.STRING, nil, base.NONE)
 
 	automower_protocol.fields = { automower_header, automower_length, automower_channel_id, automower_bool, automower_first_crc,
+			automower_packet_type, automower_frame_kind,
 			automower_protocol_major, automower_protocol_major_text, automower_protocol_minor,automower_protocol_minor_text,
-			automower_request_length, automower_response_length, automower_request_data, automower_response_data, automower_full_crc, automower_footer }
+			automower_result, automower_request_length, automower_response_length, automower_request_data,
+			automower_response_data, automower_full_crc, automower_footer, automower_setup_name }
 
 	do
 		local buffers = {}
@@ -99,7 +105,10 @@ do
 
 		subtree = tree:add(automower_protocol, tvb(), "Husqvarna AutoMower Protocol")
 
-		if not tvb(0,2):uint() == 0xFD02 then
+		-- The original dissector used `not X == VAL` for these guards which,
+		-- due to Lua operator precedence, is `(not X) == VAL` and never
+		-- triggered. Use `~=` so malformed frames are actually flagged.
+		if tvb:len() < 12 or tvb(0,2):uint() ~= 0xFD02 then
 			undecoded_automower_protocol(tvb, pinfo, tree)
 			return
 		end
@@ -107,8 +116,40 @@ do
 
 		subtree:add_le(automower_length, tvb(2,1))
 
-		if not tvb(3,1):uint() == 0x00 then
+		if tvb(3,1):uint() ~= 0x00 then
 			undecoded_automower_protocol(tvb, pinfo, tree)
+			return
+		end
+
+		local frame_len = tvb(2,1):uint()
+
+		-- ChannelId setup request: length 0x16, payload contains "Main\0".
+		-- ChannelId setup response: length 0x0d, no payload, no AF marker.
+		-- Handshake: length 0x0a (request) or 0x0b (response), no AF marker.
+		-- These frames have neither the byte-11 0xAF nor the major/minor
+		-- structure, so dissect them specifically and stop.
+		if frame_len == 0x16 then
+			subtree:add(automower_frame_kind, "ChannelId Setup Request")
+			subtree:add_le(automower_channel_id, tvb(11,4))
+			if tvb:len() >= 24 then
+				subtree:add(automower_setup_name, tvb(19, 5))
+			end
+			subtree:add_le(automower_full_crc, tvb(tvb:len() - 2, 1))
+			subtree:add_le(automower_footer, tvb(tvb:len() - 1, 1))
+			return
+		elseif frame_len == 0x0d then
+			subtree:add(automower_frame_kind, "ChannelId Setup Response")
+			subtree:add_le(automower_channel_id, tvb(10,4))
+			subtree:add_le(automower_full_crc, tvb(tvb:len() - 2, 1))
+			subtree:add_le(automower_footer, tvb(tvb:len() - 1, 1))
+			return
+		elseif frame_len == 0x0a or frame_len == 0x0b then
+			subtree:add(automower_frame_kind, is_request and "Handshake Request" or "Handshake Response")
+			subtree:add_le(automower_channel_id, tvb(4,4))
+			subtree:add_le(automower_bool, tvb(8,1))
+			subtree:add_le(automower_first_crc, tvb(9,1))
+			subtree:add_le(automower_full_crc, tvb(tvb:len() - 2, 1))
+			subtree:add_le(automower_footer, tvb(tvb:len() - 1, 1))
 			return
 		end
 
@@ -122,12 +163,10 @@ do
 
 		subtree:add_le(automower_first_crc, tvb(9,1))
 
-		if not tvb(10,1):uint() == 0x00 then
-			undecoded_automower_protocol(tvb, pinfo, tree)
-			return
-		end
+		-- Byte 10: packet type. 0x00 = request, 0x01 = response, 0x02 = event.
+		subtree:add_le(automower_packet_type, tvb(10,1))
 
-		if not tvb(11,1):uint() == 0xAF then
+		if tvb(11,1):uint() ~= 0xAF then
 			undecoded_automower_protocol(tvb, pinfo, tree)
 			return
 		end
@@ -777,28 +816,37 @@ do
 		end
 
 		if is_request then
+			-- Request layout: byte 16 = payload length (low), byte 17 = high
+			-- (always 0), bytes 18..len-3 = payload, last 2 = CRC + 0x03.
 			subtree:add_le(automower_request_length, tvb(16,1))
-			subtree:add(automower_request_data, tvb(17, tvb:len() - 20))
-
-			local automower_request_data_le = ""
-			for i = tvb:len() - 4, 17, -1 do
-				automower_request_data_le = automower_request_data_le .. string.format("%02x", tvb(i, 1):uint())
+			local req_len = tvb(16,1):uint()
+			if req_len > 0 and tvb:len() >= 18 + req_len + 2 then
+				subtree:add(automower_request_data, tvb(18, req_len))
+				local automower_request_data_le = ""
+				for i = 18 + req_len - 1, 18, -1 do
+					automower_request_data_le = automower_request_data_le .. string.format("%02x", tvb(i, 1):uint())
+				end
+				subtree:add(tvb(18, req_len), "Request Data (Little Endian): " .. automower_request_data_le)
 			end
-			subtree:add(tvb(17, tvb:len() - 20), "Request Data (Little Endian): " .. automower_request_data_le)
 		else
+			-- Response layout: byte 16 = result code, byte 17 = payload length
+			-- (low), byte 18 = high (always 0), bytes 19..len-3 = payload.
+			subtree:add_le(automower_result, tvb(16,1))
 			subtree:add_le(automower_response_length, tvb(17,1))
-			subtree:add(automower_response_data, tvb(19, tvb:len() - 21))
-
-			local automower_response_data_le = ""
-			for i = tvb:len() - 3, 19, -1 do
-				automower_response_data_le = automower_response_data_le .. string.format("%02x", tvb(i, 1):uint())
+			local rsp_len = tvb(17,1):uint()
+			if rsp_len > 0 and tvb:len() >= 19 + rsp_len + 2 then
+				subtree:add(automower_response_data, tvb(19, rsp_len))
+				local automower_response_data_le = ""
+				for i = 19 + rsp_len - 1, 19, -1 do
+					automower_response_data_le = automower_response_data_le .. string.format("%02x", tvb(i, 1):uint())
+				end
+				subtree:add(tvb(19, rsp_len), "Response Data (Little Endian): " .. automower_response_data_le)
 			end
-			subtree:add(tvb(19, tvb:len() - 21), "Response Data (Little Endian): " .. automower_response_data_le)
 		end
 
 		subtree:add_le(automower_full_crc, tvb(tvb:len() - 2,1))
 
-		if not tvb(tvb:len() - 1,1):uint() == 0x03 then
+		if tvb(tvb:len() - 1, 1):uint() ~= 0x03 then
 			undecoded_automower_protocol(tvb, pinfo, tree)
 			return
 		end
