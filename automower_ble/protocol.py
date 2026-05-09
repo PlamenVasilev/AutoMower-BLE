@@ -415,41 +415,35 @@ class BLEClient:
         # be defined in subclasses.
         self.client._backend._mtu_size = self.MTU_SIZE  # type: ignore[attr-defined]
 
+        # Locate the Husqvarna write/notify characteristics by UUID.
+        # The previous version of this loop probed every readable characteristic
+        # for diagnostic logging, but on Linux/BlueZ those probe-reads of
+        # standard GAP attributes (e.g. 0x2a04 Peripheral Preferred Connection
+        # Parameters) frequently return UNLIKELY_ERROR, which then invalidates
+        # bleak's service cache so subsequent writes fail with "Service
+        # Discovery has not been performed yet". Iterate without reading.
+        self.write_char = None  # type: ignore[assignment]
+        self.read_char = None  # type: ignore[assignment]
         for service in self.client.services:
-            logger.info("[Service] %s", service)
-
+            logger.debug("[Service] %s", service)
             for char in service.characteristics:
-                if "read" in char.properties:
-                    try:
-                        value = await self.client.read_gatt_char(char.uuid)
-                        logger.debug(
-                            "  [Characteristic] %s (%s), Value: %r",
-                            char,
-                            ",".join(char.properties),
-                            value,
-                        )
-                    except Exception as e:
-                        logger.error(
-                            "  [Characteristic] %s (%s), Error: %s",
-                            char,
-                            ",".join(char.properties),
-                            e,
-                        )
-                        if (
-                            char.uuid == "98bd0002-0b0e-421a-84e5-ddbf75dc6de4"
-                            or char.uuid == "98bd0003-0b0e-421a-84e5-ddbf75dc6de4"
-                        ):
-                            return ResponseResult.NOT_ALLOWED
-
-                else:
-                    logger.debug(
-                        "  [Characteristic] %s (%s)", char, ",".join(char.properties)
-                    )
+                logger.debug(
+                    "  [Characteristic] %s (%s)", char, ",".join(char.properties)
+                )
                 if char.uuid == "98bd0002-0b0e-421a-84e5-ddbf75dc6de4":
                     self.write_char = char
-
-                if char.uuid == "98bd0003-0b0e-421a-84e5-ddbf75dc6de4":
+                elif char.uuid == "98bd0003-0b0e-421a-84e5-ddbf75dc6de4":
                     self.read_char = char
+
+        if self.write_char is None or self.read_char is None:
+            logger.error(
+                "Husqvarna BLE characteristics not found on '%s'. The mower "
+                "may need to be trusted in BlueZ first, e.g.: "
+                "`bluetoothctl trust %s`",
+                self.address,
+                self.address,
+            )
+            return ResponseResult.NOT_ALLOWED
 
         async def notification_handler(
             characteristic: BleakGATTCharacteristic, data: bytearray

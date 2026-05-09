@@ -205,7 +205,17 @@ async def main(mower: Mower):
         )
         return
 
-    await mower.connect(device)
+    status = await mower.connect(device)
+    if status != ResponseResult.OK:
+        print(f"Failed to connect to '{mower.address}': {status.name}")
+        if status == ResponseResult.INVALID_PIN:
+            print("The PIN was rejected — re-check the value passed via --pin.")
+        elif status == ResponseResult.NOT_ALLOWED:
+            print(
+                "BLE access was refused. On Linux, try trusting the device "
+                "first: `bluetoothctl trust " + mower.address + "`"
+            )
+        return
 
     manufacturer = await mower.get_manufacturer()
     print("Mower manufacturer: " + (manufacturer or "Unknown manufacturer"))
