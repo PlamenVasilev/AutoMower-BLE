@@ -438,10 +438,14 @@ class BLEClient:
         # Parameters) frequently return UNLIKELY_ERROR, which then invalidates
         # bleak's service cache so subsequent writes fail with "Service
         # Discovery has not been performed yet". Iterate without reading.
+        logger.info("looking up Husqvarna characteristics...")
         self.write_char = None  # type: ignore[assignment]
         self.read_char = None  # type: ignore[assignment]
+        husqvarna_service_seen = False
         for service in self.client.services:
             logger.debug("[Service] %s", service)
+            if service.uuid == "98bd0001-0b0e-421a-84e5-ddbf75dc6de4":
+                husqvarna_service_seen = True
             for char in service.characteristics:
                 logger.debug(
                     "  [Characteristic] %s (%s)", char, ",".join(char.properties)
@@ -453,13 +457,15 @@ class BLEClient:
 
         if self.write_char is None or self.read_char is None:
             logger.error(
-                "Husqvarna BLE characteristics not found on '%s'. The mower "
-                "may need to be trusted in BlueZ first, e.g.: "
+                "Husqvarna BLE characteristics not found on '%s' "
+                "(Husqvarna service present: %s). On Linux, try: "
                 "`bluetoothctl trust %s`",
                 self.address,
+                husqvarna_service_seen,
                 self.address,
             )
             return ResponseResult.NOT_ALLOWED
+        logger.info("found write/notify characteristics")
 
         async def notification_handler(
             characteristic: BleakGATTCharacteristic, data: bytearray
@@ -467,10 +473,16 @@ class BLEClient:
             logger.info("Received: %s", str(binascii.hexlify(data)))
             await self.queue.put(data)
 
+        logger.info("subscribing to notifications...")
         await self.client.start_notify(self.read_char, notification_handler)
+        logger.info("subscribed to notifications")
 
-        await asyncio.sleep(5.0)
+        # Brief settling delay before the first write. The original library
+        # used 5s here; 1s is enough on every device tested so far and keeps
+        # the user-facing wait short.
+        await asyncio.sleep(1.0)
 
+        logger.info("sending channel-id setup...")
         request = self.generate_request_setup_channel_id()
         response = await self._request_response(request)
         if response is None:
