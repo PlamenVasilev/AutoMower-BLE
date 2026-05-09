@@ -6,6 +6,7 @@ import logging
 import json
 from importlib.resources import files
 from bleak.backends.characteristic import BleakGATTCharacteristic
+from bleak.exc import BleakError
 from bleak_retry_connector import establish_connection, BleakClientWithServiceCache
 from typing import TYPE_CHECKING
 
@@ -394,9 +395,21 @@ class BLEClient:
         )
         logger.info("connected")
 
+        # Best-effort BLE-level pairing. The Husqvarna mowers authenticate at
+        # the application protocol layer via EnterOperatorPin, not via SMP.
+        # On Linux/BlueZ, client.pair() commonly fails with AuthenticationFailed
+        # against mowers that refuse SMP outright (e.g. Sileno Minimo); on
+        # macOS the call is often a no-op. Either way, swallow the error and
+        # let the subsequent GATT discovery and channel setup tell us whether
+        # the connection is actually usable.
         logger.info("pairing device...")
-        await self.client.pair()
-        logger.info("paired")
+        try:
+            await self.client.pair()
+            logger.info("paired")
+        except BleakError as e:
+            logger.warning(
+                "BLE pair() failed (%s); continuing without OS-level pairing", e
+            )
 
         # This is not safe, _mtu_size is not defined in BaseBleakClient but may
         # be defined in subclasses.
