@@ -492,7 +492,22 @@ class BLEClient:
             await self.queue.put(data)
 
         logger.info("subscribing to notifications...")
-        await self.client.start_notify(self.read_char, notification_handler)
+        try:
+            await asyncio.wait_for(
+                self.client.start_notify(self.read_char, notification_handler),
+                timeout=15.0,
+            )
+        except TimeoutError:
+            logger.error(
+                "start_notify on %s timed out after 15s. The mower (or BlueZ) "
+                "is not acknowledging the CCCD write. Re-run with --debug to "
+                "see the underlying D-Bus traffic.",
+                self.read_char.uuid,
+            )
+            return ResponseResult.UNKNOWN_ERROR
+        except BleakError as e:
+            logger.error("start_notify failed: %s", e)
+            return ResponseResult.UNKNOWN_ERROR
         logger.info("subscribed to notifications")
 
         # Brief settling delay before the first write. The original library

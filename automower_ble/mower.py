@@ -339,6 +339,15 @@ if __name__ == "__main__":
         ),
     )
 
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Enable verbose logging, including bleak/BlueZ D-Bus calls. "
+            "Useful for diagnosing connect / pair / start_notify problems."
+        ),
+    )
+
     args = parser.parse_args()
 
     mower = Mower(
@@ -348,10 +357,16 @@ if __name__ == "__main__":
         pair_on_connect=args.pair_on_connect,
     )
 
-    log_level = logging.INFO
+    log_level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(
         level=log_level,
-        format="%(asctime)-15s %(name)-8s %(levelname)s: %(message)s",
+        format="%(asctime)-15s %(name)-25s %(levelname)s: %(message)s",
     )
+    if args.debug:
+        # bleak's BlueZ backend emits the most useful diagnostic messages at
+        # DEBUG level — surface them too.
+        for name in ("bleak", "bleak.backends.bluezdbus.client",
+                    "bleak.backends.bluezdbus.manager"):
+            logging.getLogger(name).setLevel(logging.DEBUG)
 
     asyncio.run(main(mower))
