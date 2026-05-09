@@ -400,28 +400,32 @@ class BLEClient:
         # On Linux/BlueZ, client.pair() commonly fails with AuthenticationFailed
         # against mowers that refuse SMP outright (e.g. Sileno Minimo). Worse,
         # those mowers also drop the link as soon as they see an SMP request
-        # they don't like, so even after we swallow the BleakError the next
-        # GATT call lands on a dead connection.
+        # they don't like — and BlueZ doesn't update is_connected synchronously
+        # when that happens, so we can't rely on a property check to detect it.
+        # If pair() raises, force a clean reconnect: tear down whatever state
+        # the failed exchange left behind and start fresh, this time without
+        # calling pair().
         logger.info("pairing device...")
         try:
             await self.client.pair()
             logger.info("paired")
         except BleakError as e:
             logger.warning(
-                "BLE pair() failed (%s); continuing without OS-level pairing", e
+                "BLE pair() failed (%s); reconnecting without OS-level pairing",
+                e,
             )
-
-        if not self.client.is_connected:
-            logger.warning(
-                "Connection dropped during pair() attempt — reconnecting "
-                "without re-pairing"
-            )
+            try:
+                await self.client.disconnect()
+            except BleakError as disc_err:
+                logger.debug("disconnect after pair failure: %s", disc_err)
+            # Give BlueZ a moment to settle before opening a new link.
+            await asyncio.sleep(0.5)
             self.client = await establish_connection(
                 BleakClientWithServiceCache,
                 device,
                 device.name or "Unknown Device",
             )
-            logger.info("reconnected")
+            logger.info("reconnected without pair()")
 
         # This is not safe, _mtu_size is not defined in BaseBleakClient but may
         # be defined in subclasses.
