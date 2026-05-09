@@ -491,24 +491,93 @@ class BLEClient:
             logger.info("Received: %s", str(binascii.hexlify(data)))
             await self.queue.put(data)
 
+        # Pre-flight: prove the link can actually carry GATT traffic before we
+        # touch the notify CCCD. On HA OS / BlueZ 5.7x we've seen StartNotify
+        # hang silently while the link itself is fine. A simple read of the
+        # read-only 98bd0004 characteristic is a good liveness probe — it
+        # proves the mower is happy with unauthenticated GATT requests.
+        try:
+            probe_value = await asyncio.wait_for(
+                self.client.read_gatt_char(
+                    "98bd0004-0b0e-421a-84e5-ddbf75dc6de4"
+                ),
+                timeout=5.0,
+            )
+            logger.info(
+                "link health probe (read 98bd0004): %s",
+                binascii.hexlify(probe_value).decode(),
+            )
+        except (TimeoutError, BleakError) as e:
+            logger.warning(
+                "link health probe failed (%s); proceeding to start_notify "
+                "anyway — the mower may still accept the CCCD write",
+                e,
+            )
+
         logger.info("subscribing to notifications...")
         try:
             await asyncio.wait_for(
                 self.client.start_notify(self.read_char, notification_handler),
                 timeout=15.0,
             )
-        except TimeoutError:
-            logger.error(
-                "start_notify on %s timed out after 15s. The mower (or BlueZ) "
-                "is not acknowledging the CCCD write. Re-run with --debug to "
-                "see the underlying D-Bus traffic.",
+            logger.info("subscribed to notifications via start_notify")
+        except (TimeoutError, BleakError) as e:
+            logger.warning(
+                "start_notify on %s did not complete (%s); falling back to "
+                "direct CCCD write",
                 self.read_char.uuid,
+                e,
             )
-            return ResponseResult.UNKNOWN_ERROR
-        except BleakError as e:
-            logger.error("start_notify failed: %s", e)
-            return ResponseResult.UNKNOWN_ERROR
-        logger.info("subscribed to notifications")
+            cccd_handle = None
+            for desc in self.read_char.descriptors:
+                if desc.uuid == "00002902-0000-1000-8000-00805f9b34fb":
+                    cccd_handle = desc.handle
+                    break
+            if cccd_handle is None:
+                logger.error(
+                    "no CCCD descriptor found on %s — cannot enable "
+                    "notifications by any path",
+                    self.read_char.uuid,
+                )
+                return ResponseResult.UNKNOWN_ERROR
+            try:
+                await asyncio.wait_for(
+                    self.client.write_gatt_descriptor(
+                        cccd_handle, bytes([0x01, 0x00])
+                    ),
+                    timeout=5.0,
+                )
+                logger.info(
+                    "CCCD direct write succeeded; registering notification "
+                    "handler manually"
+                )
+                # Register the handler against bleak's existing notification
+                # plumbing so PropertiesChanged signals are routed to our
+                # queue. start_notify normally does both the CCCD write and
+                # the registration; we did the write ourselves so we just
+                # need to attach the callback. _notification_callbacks lives
+                # on the BlueZ backend for this purpose.
+                backend = self.client._backend
+                callbacks = getattr(backend, "_notification_callbacks", None)
+                if callbacks is not None:
+                    callbacks[self.read_char.handle] = notification_handler  # type: ignore[index]
+                else:
+                    logger.error(
+                        "bleak backend has no _notification_callbacks dict; "
+                        "this version of bleak isn't supported by the "
+                        "fallback path"
+                    )
+                    return ResponseResult.UNKNOWN_ERROR
+            except (TimeoutError, BleakError) as inner:
+                logger.error(
+                    "CCCD direct write also failed: %s. The mower is "
+                    "silently ignoring writes to handle %s — likely a "
+                    "BlueZ-on-HA-OS encryption-promotion issue we can't "
+                    "fix from Python.",
+                    inner,
+                    cccd_handle,
+                )
+                return ResponseResult.UNKNOWN_ERROR
 
         # Brief settling delay before the first write. The original library
         # used 5s here; 1s is enough on every device tested so far and keeps
